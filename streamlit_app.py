@@ -440,43 +440,4 @@ with tab_cal:
 
     manual = st.text_input("Add / paste tickers (comma or space separated)", "", key=f"manual_{date_str}")
     manual_syms = [s.strip().upper() for s in manual.replace(",", " ").split() if s.strip()]
-    pool = list(dict.fromkeys(all_syms + manual_syms))
-
-    default_cap = min(25, max(1, len(pool))) if pool else 25
-    cap = st.number_input("Max tickers to scan", min_value=1, max_value=200,
-                          value=default_cap, step=5, key=f"cap_{date_str}",
-                          help="Each scan makes several Yahoo calls - keep this modest to avoid rate-limits.")
-    selected = st.multiselect("Tickers to scan (trim as you like)", pool,
-                              default=pool[:cap], key=f"sel_{date_str}")
-    selected = selected[:cap]
-
-    if st.button(f"Scan {len(selected)} ticker(s)", type="primary",
-                 use_container_width=True, disabled=not selected):
-        st.session_state["batch_results"] = run_batch(selected)
-
-
-    results = st.session_state.get("batch_results")
-    if results is not None and not results.empty:
-        counts = results["Verdict"].value_counts().to_dict()
-        st.markdown(
-            f"**{counts.get('Recommended',0)}** recommended - "
-            f"**{counts.get('Consider',0)}** consider - "
-            f"**{counts.get('Avoid',0)}** avoid - "
-            f"**{counts.get('Error',0)}** errors"
-        )
-        st.dataframe(results, use_container_width=True, hide_index=True)
-        st.download_button(
-            "Download results (CSV)",
-            results.to_csv(index=False).encode("utf-8"),
-            file_name=f"earnings_scan_{st.session_state.get('cal_date_str','')}.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-
-st.divider()
-st.markdown(
-    '<div class="disclaimer">For educational and research purposes only. Not investment advice, '
-    'and no recommendation is made. The author is not a financial advisor and accepts no '
-    'responsibility for decisions or losses from use of this tool. Consult a professional before trading.</div>',
-    unsafe_allow_html=True,
-)
+    pool = list(dict.fromkeys(all_syms + manual_syms
