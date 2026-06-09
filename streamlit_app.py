@@ -402,52 +402,58 @@ with tab_single:
 
 # ---------- Earnings date tab ----------
 with tab_cal:
-    st.caption("Pull Yahoo's earnings calendar for one date, pick which names to scan, then batch-run the same check.")
+    st.caption("Pick a date - the earnings list pulls automatically. Then trim the names and batch-run the same check.")
 
-    cal_date = st.date_input("Earnings date", value=datetime.today().date())
+    cal_date = st.date_input("Earnings date", value=datetime.today().date(), key="cal_date")
     date_str = cal_date.strftime("%Y-%m-%d")
 
-    if st.button("Fetch earnings list", use_container_width=True):
-        with st.spinner(f"Pulling Yahoo earnings for {date_str}..."):
-            st.session_state["cal_df"] = fetch_earnings_calendar(date_str)
-            st.session_state["cal_date_str"] = date_str
-            st.session_state.pop("batch_results", None)
+    # Auto-fetch whenever the date changes (cached, so repeats are instant).
+    # Clear stale batch results when the date moves.
+    if st.session_state.get("last_fetched_date") != date_str:
+        st.session_state.pop("batch_results", None)
+        st.session_state["last_fetched_date"] = date_str
+    col_a, col_b = st.columns([3, 1])
+    with col_b:
+        if st.button("Re-pull", use_container_width=True, help="Force a fresh scrape"):
+            fetch_earnings_calendar.clear()
+    with st.spinner(f"Pulling Yahoo earnings for {date_str}..."):
+        cal_df = fetch_earnings_calendar(date_str)
 
-    cal_df = st.session_state.get("cal_df")
-    if cal_df is not None:
-        if cal_df.empty:
-            st.warning(
-                f"No tickers scraped for {st.session_state.get('cal_date_str', date_str)}. "
-                "Yahoo may have blocked the request or changed the page. "
-                "You can paste tickers manually below instead."
-            )
-        else:
-            st.success(f"Found {len(cal_df)} companies reporting on {st.session_state.get('cal_date_str', date_str)}.")
+    if cal_df.empty:
+        st.warning(
+            f"No tickers scraped for {date_str}. Yahoo may be blocking the request or ignoring "
+            "the date. Paste tickers manually below to scan anyway."
+        )
+    else:
+        syms = cal_df["Symbol"].tolist()
+        st.success(f"{len(syms)} companies reporting on {date_str}.")
+        with st.expander("Show fetched tickers"):
+            st.write(", ".join(syms))
 
-        # ----- filters set each run -----
-        all_syms = cal_df["Symbol"].tolist() if not cal_df.empty else []
+    all_syms = cal_df["Symbol"].tolist() if not cal_df.empty else []
 
-        time_col = next((c for c in cal_df.columns if "call time" in str(c).lower()), None) if not cal_df.empty else None
-        if time_col:
-            times = sorted(cal_df[time_col].dropna().astype(str).unique().tolist())
-            pick_times = st.multiselect("Earnings call time", times, default=times)
-            all_syms = cal_df[cal_df[time_col].astype(str).isin(pick_times)]["Symbol"].tolist()
+    time_col = next((c for c in cal_df.columns if "call time" in str(c).lower()), None) if not cal_df.empty else None
+    if time_col:
+        times = sorted(cal_df[time_col].dropna().astype(str).unique().tolist())
+        pick_times = st.multiselect("Earnings call time", times, default=times, key=f"times_{date_str}")
+        all_syms = cal_df[cal_df[time_col].astype(str).isin(pick_times)]["Symbol"].tolist()
 
-        manual = st.text_input("Add / paste tickers (comma or space separated)", "")
-        manual_syms = [s.strip().upper() for s in manual.replace(",", " ").split() if s.strip()]
-        pool = list(dict.fromkeys(all_syms + manual_syms))
+    manual = st.text_input("Add / paste tickers (comma or space separated)", "", key=f"manual_{date_str}")
+    manual_syms = [s.strip().upper() for s in manual.replace(",", " ").split() if s.strip()]
+    pool = list(dict.fromkeys(all_syms + manual_syms))
 
-        default_cap = min(25, max(1, len(pool))) if pool else 25
-        cap = st.number_input("Max tickers to scan", min_value=1, max_value=200,
-                              value=default_cap, step=5,
-                              help="Each scan makes several Yahoo calls - keep this modest to avoid rate-limits.")
-        default_sel = pool[:cap]
-        selected = st.multiselect("Tickers to scan (trim as you like)", pool, default=default_sel)
-        selected = selected[:cap]
+    default_cap = min(25, max(1, len(pool))) if pool else 25
+    cap = st.number_input("Max tickers to scan", min_value=1, max_value=200,
+                          value=default_cap, step=5, key=f"cap_{date_str}",
+                          help="Each scan makes several Yahoo calls - keep this modest to avoid rate-limits.")
+    selected = st.multiselect("Tickers to scan (trim as you like)", pool,
+                              default=pool[:cap], key=f"sel_{date_str}")
+    selected = selected[:cap]
 
-        if st.button(f"Scan {len(selected)} ticker(s)", type="primary",
-                     use_container_width=True, disabled=not selected):
-            st.session_state["batch_results"] = run_batch(selected)
+    if st.button(f"Scan {len(selected)} ticker(s)", type="primary",
+                 use_container_width=True, disabled=not selected):
+        st.session_state["batch_results"] = run_batch(selected)
+
 
     results = st.session_state.get("batch_results")
     if results is not None and not results.empty:
