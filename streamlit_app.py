@@ -11,17 +11,21 @@ Always consult a professional financial advisor before making any investment dec
 NOTE ON FIDELITY:
 The five analysis functions below (filter_dates, yang_zhang, build_term_structure,
 get_current_price, compute_recommendation) are copied VERBATIM from the original
-calculator.py. Only the FreeSimpleGUI front-end has been replaced with Streamlit, and
-compute_recommendation additionally returns the raw intermediate values (keys prefixed
-with "_") for display. The four gate keys and every threshold are byte-for-byte unchanged.
-Data is pulled with yfinance server-side — identical to the desktop tool.
+calculator.py. The four gate keys and every threshold are byte-for-byte unchanged. The
+earnings-calendar batch scan simply feeds tickers into the SAME compute_recommendation;
+it does not alter any calculation.
 """
+
+import time
+from io import StringIO
+from datetime import datetime, timedelta
 
 import streamlit as st
 import yfinance as yf
-from datetime import datetime, timedelta
-from scipy.interpolate import interp1d
 import numpy as np
+import pandas as pd
+import requests
+from scipy.interpolate import interp1d
 
 
 # ============================================================================
@@ -224,14 +228,109 @@ def compute_recommendation(ticker):
 
 
 # ============================================================================
-# ===== STREAMLIT FRONT-END (replaces the FreeSimpleGUI window) ==============
+# ===== HELPERS layered ON TOP (do not touch the logic above) ================
 # ============================================================================
 
-st.set_page_config(page_title="Options Edge · Earnings Scan", page_icon="⚖︎", layout="centered")
+def verdict_of(av, iv, ts):
+    """Same branching as the original GUI."""
+    if av and iv and ts:
+        return "Recommended"
+    elif ts and ((av and not iv) or (iv and not av)):
+        return "Consider"
+    return "Avoid"
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def scan_one(ticker):
+    """Run compute_recommendation on one ticker; never raise. Cached 15 min."""
+    try:
+        res = compute_recommendation(ticker)
+    except Exception:
+        return {"Ticker": ticker, "Verdict": "Error", "_rank": 4, "Note": "scan failed"}
+    if isinstance(res, str):
+        return {"Ticker": ticker, "Verdict": "Error", "_rank": 4, "Note": res.replace("Error: ", "")}
+    av, iv, ts = res['avg_volume'], res['iv30_rv30'], res['ts_slope_0_45']
+    v = verdict_of(av, iv, ts)
+    rank = {"Recommended": 0, "Consider": 1, "Avoid": 2}[v]
+    return {
+        "Ticker": ticker,
+        "Verdict": v,
+        "Price": round(res['_underlying'], 2),
+        "IV30/RV30": round(res['_iv30_rv30_raw'], 2),
+        "Slope": round(res['_ts_slope_raw'], 5),
+        "AvgVol(M)": round(res['_avg_volume_raw'] / 1e6, 2),
+        "Exp.Move": res['expected_move'] or "—",
+        "Vol": "pass" if av else "fail",
+        "IV/RV": "pass" if iv else "fail",
+        "Slope?": "pass" if ts else "fail",
+        "_rank": rank,
+        "Note": "",
+    }
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_earnings_calendar(date_str):
+    """
+    Scrape Yahoo's earnings calendar for a single date (YYYY-MM-DD).
+    Returns a DataFrame with at least a 'Symbol' column, or empty on failure.
+    Fragile by nature — Yahoo can change the page or block server IPs.
+    """
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                       "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"),
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    rows = []
+    offset, size = 0, 100
+    for _ in range(12):  # safety cap (~1200 names)
+        url = f"https://finance.yahoo.com/calendar/earnings?day={date_str}&offset={offset}&size={size}"
+        try:
+            r = requests.get(url, headers=headers, timeout=25)
+            r.raise_for_status()
+            tables = pd.read_html(StringIO(r.text))
+        except Exception:
+            break
+        if not tables:
+            break
+        df = tables[0]
+        sym_col = next((c for c in df.columns if str(c).strip().lower() == "symbol"), None)
+        if sym_col is None or df.empty:
+            break
+        rows.append(df.rename(columns={sym_col: "Symbol"}))
+        if len(df) < size:
+            break
+        offset += size
+        time.sleep(0.4)
+    if not rows:
+        return pd.DataFrame(columns=["Symbol"])
+    out = pd.concat(rows, ignore_index=True)
+    out["Symbol"] = out["Symbol"].astype(str).str.strip().str.upper()
+    out = out.drop_duplicates(subset="Symbol").reset_index(drop=True)
+    return out
+
+
+def run_batch(tickers):
+    results = []
+    prog = st.progress(0.0, text="Scanning...")
+    n = len(tickers)
+    for idx, t in enumerate(tickers):
+        results.append(scan_one(t))
+        prog.progress((idx + 1) / n, text=f"Scanning {t}  ({idx + 1}/{n})")
+        time.sleep(0.3)  # be gentle with Yahoo
+    prog.empty()
+    df = pd.DataFrame(results).sort_values(["_rank", "IV30/RV30"], ascending=[True, False])
+    return df.drop(columns=["_rank"])
+
+
+# ============================================================================
+# ===== STREAMLIT FRONT-END ==================================================
+# ============================================================================
+
+st.set_page_config(page_title="Options Edge - Earnings Scan", page_icon="*", layout="centered")
 
 st.markdown("""
 <style>
-  .block-container{max-width:560px;padding-top:2.2rem;}
+  .block-container{max-width:620px;padding-top:2rem;}
   .eyebrow{font-family:ui-monospace,monospace;font-size:11px;letter-spacing:.28em;
     text-transform:uppercase;color:#C9A227;}
   .verdict{font-weight:800;font-size:34px;letter-spacing:.01em;margin:.1rem 0 .2rem;}
@@ -249,61 +348,124 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="eyebrow">Options Edge · Earnings Volatility Scan</div>', unsafe_allow_html=True)
+st.markdown('<div class="eyebrow">Options Edge - Earnings Volatility Scan</div>', unsafe_allow_html=True)
 st.title("Pre-Earnings Volatility Check")
-st.caption("Live option chain + 3 months of prices, pulled server-side via yfinance — same data path as the desktop tool.")
 
-with st.form("scan"):
-    ticker = st.text_input("Stock symbol", placeholder="AAPL", max_chars=8).strip().upper()
-    submitted = st.form_submit_button("Run scan", type="primary", use_container_width=True)
+tab_single, tab_cal = st.tabs(["Single ticker", "Earnings date"])
 
-if submitted:
-    if not ticker:
-        st.warning("Enter a ticker symbol first.")
-    else:
-        with st.spinner(f"Scanning {ticker}…"):
-            try:
-                result = compute_recommendation(ticker)
-            except Exception as e:
-                result = f"Error: {e}"
+# ---------- Single ticker tab ----------
+with tab_single:
+    st.caption("Live option chain + 3 months of prices, server-side via yfinance.")
+    with st.form("scan"):
+        ticker = st.text_input("Stock symbol", placeholder="AAPL", max_chars=8).strip().upper()
+        submitted = st.form_submit_button("Run scan", type="primary", use_container_width=True)
 
-        if isinstance(result, str):
-            st.error(result)
+    if submitted:
+        if not ticker:
+            st.warning("Enter a ticker symbol first.")
         else:
-            av = result['avg_volume']
-            iv = result['iv30_rv30']
-            ts = result['ts_slope_0_45']
+            with st.spinner(f"Scanning {ticker}..."):
+                try:
+                    result = compute_recommendation(ticker)
+                except Exception as e:
+                    result = f"Error: {e}"
 
-            # verdict branching — identical to the original GUI
-            if av and iv and ts:
-                title, color = "RECOMMENDED", "#4FB477"
-            elif ts and ((av and not iv) or (iv and not av)):
-                title, color = "CONSIDER", "#E0A33E"
+            if isinstance(result, str):
+                st.error(result)
             else:
-                title, color = "AVOID", "#D7544C"
+                av = result['avg_volume']; iv = result['iv30_rv30']; ts = result['ts_slope_0_45']
+                title = verdict_of(av, iv, ts)
+                color = {"Recommended": "#4FB477", "Consider": "#E0A33E", "Avoid": "#D7544C"}[title]
 
-            st.markdown(
-                f'<div class="verdict" style="color:{color}">{title}</div>'
-                f'<div class="vsub">{ticker} · ${result["_underlying"]:.2f}</div>',
-                unsafe_allow_html=True,
+                st.markdown(
+                    f'<div class="verdict" style="color:{color}">{title.upper()}</div>'
+                    f'<div class="vsub">{ticker} - ${result["_underlying"]:.2f}</div>',
+                    unsafe_allow_html=True,
+                )
+
+                def row(name, sub, val, ok):
+                    chip = "pass" if ok else "fail"
+                    lab = "PASS" if ok else "FAIL"
+                    return (f'<div class="metric"><div class="nm">{name}<small>{sub}</small></div>'
+                            f'<div><span class="vl">{val}</span>'
+                            f'<span class="chip {chip}">{lab}</span></div></div>')
+
+                vol_raw = result['_avg_volume_raw']
+                vol_disp = f"{vol_raw/1e6:.2f}M" if vol_raw >= 1e6 else f"{vol_raw:,.0f}"
+                html = ""
+                html += row("Avg volume (30d)", "threshold >= 1.5M", vol_disp, av)
+                html += row("IV30 / RV30", "threshold >= 1.25", f"{result['_iv30_rv30_raw']:.2f}", iv)
+                html += row("Term slope 0-45", "threshold <= -0.00406", f"{result['_ts_slope_raw']:.5f}", ts)
+                move = result['expected_move'] if result['expected_move'] else "-"
+                html += row("Expected move", "front-month straddle / spot", move, bool(result['expected_move']))
+                st.markdown(html, unsafe_allow_html=True)
+
+# ---------- Earnings date tab ----------
+with tab_cal:
+    st.caption("Pull Yahoo's earnings calendar for one date, pick which names to scan, then batch-run the same check.")
+
+    cal_date = st.date_input("Earnings date", value=datetime.today().date())
+    date_str = cal_date.strftime("%Y-%m-%d")
+
+    if st.button("Fetch earnings list", use_container_width=True):
+        with st.spinner(f"Pulling Yahoo earnings for {date_str}..."):
+            st.session_state["cal_df"] = fetch_earnings_calendar(date_str)
+            st.session_state["cal_date_str"] = date_str
+            st.session_state.pop("batch_results", None)
+
+    cal_df = st.session_state.get("cal_df")
+    if cal_df is not None:
+        if cal_df.empty:
+            st.warning(
+                f"No tickers scraped for {st.session_state.get('cal_date_str', date_str)}. "
+                "Yahoo may have blocked the request or changed the page. "
+                "You can paste tickers manually below instead."
             )
+        else:
+            st.success(f"Found {len(cal_df)} companies reporting on {st.session_state.get('cal_date_str', date_str)}.")
 
-            def row(name, sub, val, ok):
-                chip = "pass" if ok else "fail"
-                lab = "PASS" if ok else "FAIL"
-                return (f'<div class="metric"><div class="nm">{name}<small>{sub}</small></div>'
-                        f'<div><span class="vl">{val}</span>'
-                        f'<span class="chip {chip}">{lab}</span></div></div>')
+        # ----- filters set each run -----
+        all_syms = cal_df["Symbol"].tolist() if not cal_df.empty else []
 
-            vol_raw = result['_avg_volume_raw']
-            vol_disp = f"{vol_raw/1e6:.2f}M" if vol_raw >= 1e6 else f"{vol_raw:,.0f}"
-            html = ""
-            html += row("Avg volume (30d)", "threshold ≥ 1.5M", vol_disp, av)
-            html += row("IV30 / RV30", "threshold ≥ 1.25", f"{result['_iv30_rv30_raw']:.2f}", iv)
-            html += row("Term slope 0→45", "threshold ≤ −0.00406", f"{result['_ts_slope_raw']:.5f}", ts)
-            move = result['expected_move'] if result['expected_move'] else "—"
-            html += row("Expected move", "front-month straddle / spot", move, True if result['expected_move'] else False)
-            st.markdown(html, unsafe_allow_html=True)
+        time_col = next((c for c in cal_df.columns if "call time" in str(c).lower()), None) if not cal_df.empty else None
+        if time_col:
+            times = sorted(cal_df[time_col].dropna().astype(str).unique().tolist())
+            pick_times = st.multiselect("Earnings call time", times, default=times)
+            all_syms = cal_df[cal_df[time_col].astype(str).isin(pick_times)]["Symbol"].tolist()
+
+        manual = st.text_input("Add / paste tickers (comma or space separated)", "")
+        manual_syms = [s.strip().upper() for s in manual.replace(",", " ").split() if s.strip()]
+        pool = list(dict.fromkeys(all_syms + manual_syms))
+
+        default_cap = min(25, max(1, len(pool))) if pool else 25
+        cap = st.number_input("Max tickers to scan", min_value=1, max_value=200,
+                              value=default_cap, step=5,
+                              help="Each scan makes several Yahoo calls - keep this modest to avoid rate-limits.")
+        default_sel = pool[:cap]
+        selected = st.multiselect("Tickers to scan (trim as you like)", pool, default=default_sel)
+        selected = selected[:cap]
+
+        if st.button(f"Scan {len(selected)} ticker(s)", type="primary",
+                     use_container_width=True, disabled=not selected):
+            st.session_state["batch_results"] = run_batch(selected)
+
+    results = st.session_state.get("batch_results")
+    if results is not None and not results.empty:
+        counts = results["Verdict"].value_counts().to_dict()
+        st.markdown(
+            f"**{counts.get('Recommended',0)}** recommended - "
+            f"**{counts.get('Consider',0)}** consider - "
+            f"**{counts.get('Avoid',0)}** avoid - "
+            f"**{counts.get('Error',0)}** errors"
+        )
+        st.dataframe(results, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download results (CSV)",
+            results.to_csv(index=False).encode("utf-8"),
+            file_name=f"earnings_scan_{st.session_state.get('cal_date_str','')}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
 
 st.divider()
 st.markdown(
