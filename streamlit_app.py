@@ -425,12 +425,13 @@ with tab_cal:
             "the date. Paste tickers manually below to scan anyway."
         )
     else:
-        syms = cal_df["Symbol"].tolist()
+        syms = [str(x).strip().upper() for x in cal_df["Symbol"].tolist() if pd.notna(x) and str(x).strip()]
         st.success(f"{len(syms)} companies reporting on {date_str}.")
         with st.expander("Show fetched tickers"):
             st.write(", ".join(syms))
+    
+    all_syms = [str(x).strip().upper() for x in cal_df["Symbol"].tolist() if pd.notna(x) and str(x).strip()] if not cal_df.empty else []
 
-    all_syms = cal_df["Symbol"].tolist() if not cal_df.empty else []
 
     time_col = next((c for c in cal_df.columns if "call time" in str(c).lower()), None) if not cal_df.empty else None
     if time_col:
