@@ -1,5 +1,8 @@
 streamlit
-yfinance
+yfinance==0.2.54
 numpy
 scipy
 pandas
+requests
+lxml
+beautifulsoup4
