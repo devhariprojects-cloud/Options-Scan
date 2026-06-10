@@ -10,14 +10,13 @@ Always consult a professional financial advisor before making any investment dec
 
 NOTE ON FIDELITY:
 The five analysis functions below (filter_dates, yang_zhang, build_term_structure,
-get_current_price, compute_recommendation) are copied VERBATIM from the original
-calculator.py. The four gate keys and every threshold are byte-for-byte unchanged. The
-earnings-calendar batch scan simply feeds tickers into the SAME compute_recommendation;
-it does not alter any calculation.
+get_current_price, compute_recommendation) match the original calculator.py in logic
+byte-for-byte: the three gates and every threshold are unchanged. Additions are the
+"_raw" display values and a more informative error message. The earnings-calendar batch
+scan feeds tickers into the SAME compute_recommendation; it does not alter any calculation.
 """
 
 import time
-from io import StringIO
 from datetime import datetime, timedelta
 
 import streamlit as st
@@ -29,7 +28,7 @@ from scipy.interpolate import interp1d
 
 
 # ============================================================================
-# ===== ANALYSIS LOGIC — VERBATIM FROM calculator.py (do not modify) =========
+# ===== ANALYSIS LOGIC — matches calculator.py (do not modify) ===============
 # ============================================================================
 
 def filter_dates(dates):
@@ -144,10 +143,8 @@ def compute_recommendation(ticker):
             underlying_price = get_current_price(stock)
             if underlying_price is None:
                 raise ValueError("No market price found.")
-    
-        except Exception as e:
-            raise Exception(f'{type(e).__name__}: {e}')
-
+        except Exception:
+            return "Error: Unable to retrieve underlying stock price."
 
         atm_iv = {}
         straddle = None
@@ -225,8 +222,8 @@ def compute_recommendation(ticker):
             '_ts_slope_raw': float(ts_slope_0_45),
             '_underlying': float(underlying_price),
         }
-    except Exception:
-        raise Exception('Error occured processing')
+    except Exception as e:
+        raise Exception(f'{type(e).__name__}: {e}')
 
 
 # ============================================================================
@@ -283,8 +280,7 @@ def fetch_earnings_calendar(date_str):
     """
     Pull earnings for a single date (YYYY-MM-DD) from the Finnhub API (free tier).
     Returns a DataFrame with 'Symbol' and 'Call Time' columns, or empty on failure.
-    Requires FINNHUB_API_KEY in Streamlit secrets. Honors the date server-side, so
-    it does not have the Yahoo-scrape date/blocking problems.
+    Requires FINNHUB_API_KEY in Streamlit secrets.
     """
     key = _finnhub_key()
     if not key:
@@ -367,7 +363,7 @@ with tab_single:
     st.caption("Live option chain + 3 months of prices, server-side via yfinance.")
     with st.form("scan"):
         ticker = st.text_input("Stock symbol", placeholder="AAPL", max_chars=8).strip().upper()
-        submitted = st.form_submit_button("Run scan", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("Run scan", type="primary", width='stretch')
 
     if submitted:
         if not ticker:
@@ -417,13 +413,12 @@ with tab_cal:
     date_str = cal_date.strftime("%Y-%m-%d")
 
     # Auto-fetch whenever the date changes (cached, so repeats are instant).
-    # Clear stale batch results when the date moves.
     if st.session_state.get("last_fetched_date") != date_str:
         st.session_state.pop("batch_results", None)
         st.session_state["last_fetched_date"] = date_str
     col_a, col_b = st.columns([3, 1])
     with col_b:
-        if st.button("Re-pull", use_container_width=True, help="Force a fresh pull"):
+        if st.button("Re-pull", width='stretch', help="Force a fresh pull"):
             fetch_earnings_calendar.clear()
     with st.spinner(f"Pulling earnings calendar for {date_str}..."):
         cal_df = fetch_earnings_calendar(date_str)
@@ -466,9 +461,8 @@ with tab_cal:
     selected = selected[:cap]
 
     if st.button(f"Scan {len(selected)} ticker(s)", type="primary",
-                 use_container_width=True, disabled=not selected):
+                 width='stretch', disabled=not selected):
         res_df = run_batch(selected)
-        # Attach each ticker's earnings call time (from the calendar pull) for visibility.
         time_map = (dict(zip(cal_df["Symbol"], cal_df["Call Time"]))
                     if (not cal_df.empty and "Call Time" in cal_df.columns) else {})
         res_df["Call Time"] = res_df["Ticker"].map(time_map).fillna("—")
@@ -485,13 +479,13 @@ with tab_cal:
             f"**{counts.get('Avoid',0)}** avoid - "
             f"**{counts.get('Error',0)}** errors"
         )
-        st.dataframe(results, use_container_width=True, hide_index=True)
+        st.dataframe(results, width='stretch', hide_index=True)
         st.download_button(
             "Download results (CSV)",
             results.to_csv(index=False).encode("utf-8"),
             file_name=f"earnings_scan_{date_str}.csv",
             mime="text/csv",
-            use_container_width=True,
+            width='stretch',
         )
 
 st.divider()
