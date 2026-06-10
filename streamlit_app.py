@@ -320,7 +320,12 @@ def run_batch(tickers):
         prog.progress((idx + 1) / n, text=f"Scanning {t}  ({idx + 1}/{n})")
         time.sleep(0.3)  # be gentle with the data source
     prog.empty()
-    df = pd.DataFrame(results).sort_values(["_rank", "IV30/RV30"], ascending=[True, False])
+    df = pd.DataFrame(results)
+    if "_rank" not in df.columns:
+        df["_rank"] = 4
+    if "IV30/RV30" not in df.columns:
+        df["IV30/RV30"] = float("nan")
+    df = df.sort_values(["_rank", "IV30/RV30"], ascending=[True, False])
     return df.drop(columns=["_rank"])
 
 
@@ -460,7 +465,14 @@ with tab_cal:
 
     if st.button(f"Scan {len(selected)} ticker(s)", type="primary",
                  use_container_width=True, disabled=not selected):
-        st.session_state["batch_results"] = run_batch(selected)
+        res_df = run_batch(selected)
+        # Attach each ticker's earnings call time (from the calendar pull) for visibility.
+        time_map = (dict(zip(cal_df["Symbol"], cal_df["Call Time"]))
+                    if (not cal_df.empty and "Call Time" in cal_df.columns) else {})
+        res_df["Call Time"] = res_df["Ticker"].map(time_map).fillna("—")
+        cols = res_df.columns.tolist()
+        cols.insert(2, cols.pop(cols.index("Call Time")))  # show it right after Verdict
+        st.session_state["batch_results"] = res_df[cols]
 
     results = st.session_state.get("batch_results")
     if results is not None and not results.empty:
