@@ -144,8 +144,10 @@ def compute_recommendation(ticker):
             underlying_price = get_current_price(stock)
             if underlying_price is None:
                 raise ValueError("No market price found.")
-        except Exception:
-            return "Error: Unable to retrieve underlying stock price."
+    
+        except Exception as e:
+            raise Exception(f'{type(e).__name__}: {e}')
+
 
         atm_iv = {}
         straddle = None
